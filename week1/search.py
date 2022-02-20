@@ -6,6 +6,7 @@ from flask import (
 )
 
 from week1.opensearch import get_opensearch
+import json
 
 bp = Blueprint('search', __name__, url_prefix='/search')
 
@@ -15,6 +16,8 @@ bp = Blueprint('search', __name__, url_prefix='/search')
 # display_filters -- return an array of filters that are applied that is appropriate for display
 # applied_filters -- return a String that is appropriate for inclusion in a URL as part of a query string.  This is basically the same as the input query string
 def process_filters(filters_input):
+    print("process_filters ---------------")
+    print("filters_input: {}".format(filters_input))
     # Filters look like: &filter.name=regularPrice&regularPrice.key={{ agg.key }}&regularPrice.from={{ agg.from }}&regularPrice.to={{ agg.to }}
     filters = []
     display_filters = []  # Also create the text we will use to display the filters that are applied
@@ -26,12 +29,31 @@ def process_filters(filters_input):
         # We need to capture and return what filters are already applied so they can be automatically added to any existing links we display in aggregations.jinja2
         applied_filters += "&filter.name={}&{}.type={}&{}.displayName={}".format(filter, filter, type, filter,
                                                                                  display_name)
-        #TODO: IMPLEMENT AND SET filters, display_filters and applied_filters.
         # filters get used in create_query below.  display_filters gets used by display_filters.jinja2 and applied_filters gets used by aggregations.jinja2 (and any other links that would execute a search.)
         if type == "range":
-            pass
+            from_val = request.args.get(filter + ".from", None)
+            to_val = request.args.get(filter + ".to", None)
+            print("from: {}, to: {}".format(from_val, to_val))
+            to_from = {}
+            if from_val:
+                to_from["gte"] = from_val
+            else:
+                from_val = "*"  # set it to * for display purposes, but don't use it in the query
+            if to_val:
+                to_from["lt"] = to_val
+            else:
+                to_val = "*"  # set it to * for display purposes, but don't use it in the query
+            the_filter = {"range": {filter: to_from}}
+            filters.append(the_filter)
+            display_filters.append("{}: {} TO {}".format(display_name, from_val, to_val))
+            applied_filters += "&{}.from={}&{}.to={}".format(filter, from_val, filter, to_val)
         elif type == "terms":
-            pass #TODO: IMPLEMENT
+            field = request.args.get(filter + ".fieldName", filter)
+            key = request.args.get(filter + ".key", None)
+            the_filter = { "term": { field: key }}
+            filters.append(the_filter)
+            display_filters.append("{}: {}".format(display_name, key))
+            applied_filters += "&{}.fieldName={}&{}.key={}".format(filter, field, filter, key)
     print("Filters: {}".format(filters))
 
     return filters, display_filters, applied_filters
@@ -51,6 +73,7 @@ def query():
     sort = "_score"
     sortDir = "desc"
     if request.method == 'POST':  # a query has been submitted
+        print("this is a POST method!!")
         user_query = request.form['query']
         if not user_query:
             user_query = "*"
@@ -62,6 +85,7 @@ def query():
             sortDir = "desc"
         query_obj = create_query(user_query, [], sort, sortDir)
     elif request.method == 'GET':  # Handle the case where there is no query or just loading the page
+        print("this is a GET method!!")
         user_query = request.args.get("query", "*")
         filters_input = request.args.getlist("filter.name")
         sort = request.args.get("sort", sort)
@@ -74,11 +98,19 @@ def query():
         query_obj = create_query("*", [], sort, sortDir)
 
     print("query obj: {}".format(query_obj))
-    response = None   # TODO: Replace me with an appropriate call to OpenSearch
+
+    try:
+        response = opensearch.search(body=query_obj, index='bbuy_products')
+        print(response)
+    except Exception as e:
+        print(e)
+        error = e
+
     # Postprocess results here if you so desire
 
-    #print(response)
     if error is None:
+        print("display_filters: {}".format(display_filters))
+        print("applied_filters: {}".format(applied_filters))
         return render_template("search_results.jinja2", query=user_query, search_response=response,
                                display_filters=display_filters, applied_filters=applied_filters,
                                sort=sort, sortDir=sortDir)
@@ -86,15 +118,74 @@ def query():
         redirect(url_for("index"))
 
 
+def search_query(user_query):
+    return {
+        'multi_match': {
+            'query': user_query,
+            'fields': [
+                   "name^100",
+                   "shortDescription^50",
+                   "longDescription^10",
+                   "department",
+                   "manufacturer"
+            ]
+        }
+    }
+
+def search_filters(filters):
+    return filters
+
+def department_aggregation():
+    return {
+        "terms": {
+            "field": "department.keyword",
+            "min_doc_count": 1
+        },
+    }
+
+def price_aggregation():
+    return {
+        "range": {
+            "field": "regularPrice",
+            "ranges": [
+                {"key": "$", "to": 100},
+                {"key": "$$", "from": 100, "to": 200},
+                {"key": "$$$", "from": 200, "to": 300},
+                {"key": "$$$$", "from": 300, "to": 400},
+                {"key": "$$$$$", "from": 400, "to": 500},
+                {"key": "$$$$$$", "from": 500},
+            ]
+         },
+        "aggs": {
+            "price_stats": {
+                "stats": {"field": "regularPrice"}
+            }
+        }
+    }
+
+def missing_images_aggregation():
+    return {
+        "missing": {
+            "field": "image"
+        }
+    }
+
 def create_query(user_query, filters, sort="_score", sortDir="desc"):
     print("Query: {} Filters: {} Sort: {}".format(user_query, filters, sort))
     query_obj = {
-        'size': 10,
+        "size": 10,
         "query": {
-            "match_all": {} # Replace me with a query that both searches and filters
+            "bool": {
+                "must": search_query(user_query),
+                "filter": search_filters(filters)
+            },
         },
         "aggs": {
-            #TODO: FILL ME IN
+            "department": department_aggregation(),
+            "regularPrice": price_aggregation(),
+            "missing_images": missing_images_aggregation()
         }
     }
+    print(json.dumps(query_obj))
+
     return query_obj
