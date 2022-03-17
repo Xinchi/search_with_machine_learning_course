@@ -1,4 +1,5 @@
 import os
+import string
 import argparse
 import xml.etree.ElementTree as ET
 import pandas as pd
@@ -48,9 +49,25 @@ parents_df = pd.DataFrame(list(zip(categories, parents)), columns =['category', 
 df = pd.read_csv(queries_file_name)[['category', 'query']]
 df = df[df['category'].isin(categories)]
 
-# IMPLEMENT ME: Convert queries to lowercase, and optionally implement other normalization, like stemming.
+def normalise_query(query):
+    query = query.strip().lower()
+    tokens = query.split()
+    stemmed_tokens = [stemmer.stem(token) for token in tokens]
+    query = ' '.join(stemmed_tokens)
+    return query
 
-# IMPLEMENT ME: Roll up categories to ancestors to satisfy the minimum number of queries per category.
+df['query'] = df['query'].apply(normalise_query)
+print("unique cateogies:", len(df['category'].unique()))
+
+
+df_with_counts = df.groupby('category').size().reset_index(name='count')
+df_merged = df.merge(df_with_counts, how='left', on='category').merge(parents_df, how='left', on='category')
+while len(df_merged[df_merged['count'] < min_queries]) > 0:
+    df_merged.loc[df_merged['count'] < min_queries, 'category'] = df_merged['parent']
+    df = df_merged[['category', 'query']]
+    df = df[df['category'].isin(categories)]
+    df_with_counts = df.groupby('category').size().reset_index(name='count')
+    df_merged = df.merge(df_with_counts, how='left', on='category').merge(parents_df, how='left', on='category')
 
 # Create labels in fastText format.
 df['label'] = '__label__' + df['category']
